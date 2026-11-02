@@ -29,7 +29,12 @@ const PATHS: Record<string, string> = {
   paperclip: "M20 11l-8.5 8.5a5 5 0 01-7-7L13 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L14 7",
   file: "M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6",
   chevron: "M9 6l6 6-6 6",
+  user: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
+  archive: "M4 5h16v4H4zM6 9v10h12V9M10 13h4",
+  comment: "M4 5h16v11H10l-4 4v-4H4z",
   shuffle: "M16 4h4v4M4 20L20 4M20 16v4h-4M15 15l5 5M4 4l5 5",
+  camera: "M4 8h3l2-3h6l2 3h3v11H4zM12 17a3.5 3.5 0 100-7 3.5 3.5 0 000 7z",
+  pause: "M8 5v14M16 5v14",
 };
 
 export function Icon({ n, size = 16 }: { n: keyof typeof PATHS | string; size?: number }) {
@@ -40,7 +45,11 @@ export function Icon({ n, size = 16 }: { n: keyof typeof PATHS | string; size?: 
   );
 }
 
-export function Avatar({ name, size = 24 }: { name: string; size?: number }) {
+export function Avatar({ name, size = 24, src }: { name: string; size?: number; src?: string | null }) {
+  if (src) {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img className="avatar" src={src} alt="" title={name} style={{ width: size, height: size, objectFit: "cover" }} />;
+  }
   let h = 7;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) | 0;
   return (

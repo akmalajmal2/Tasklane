@@ -15,7 +15,11 @@ export default async function AdminPage() {
   const { data: me } = await supabase.from("profiles").select("is_admin").eq("id", user!.id).single();
   if (!me?.is_admin) redirect("/projects");
 
-  const { data: people } = await supabase.from("profiles").select("id,email,full_name,is_admin,created_at").order("created_at");
+  let people: Omit<Profile, "mute_email">[] | null = (await supabase.from("profiles").select("id,email,full_name,is_admin,created_at,avatar_url").order("created_at")).data as Omit<Profile, "mute_email">[] | null;
+  if (!people) {
+    const { data } = await supabase.from("profiles").select("id,email,full_name,is_admin,created_at").order("created_at");
+    people = (data ?? []).map((d) => ({ ...d, avatar_url: null })) as unknown as Omit<Profile, "mute_email">[];
+  }
   return (
     <main className="page">
       <div className="page-head">
@@ -30,11 +34,11 @@ export default async function AdminPage() {
             <tr><th>Person</th><th>Access</th><th aria-label="Actions" /></tr>
           </thead>
           <tbody>
-            {((people ?? []) as Profile[]).map((p) => (
+            {(people ?? []).map((p) => (
               <tr key={p.id}>
                 <td>
                   <div className="person">
-                    <Avatar name={p.full_name || p.email} size={32} />
+                    <Avatar name={p.full_name || p.email} size={32} src={p.avatar_url} />
                     <div>{p.full_name}<small>{p.email}</small></div>
                   </div>
                 </td>

@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
   });
   const { data, error } = await admin.rpc("flag_overdue");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  await admin.rpc("sweep_stale_timers"); // stops clocks whose browser disappeared
   const list = (data ?? []) as Notified[];
   await deliver(list);
   return NextResponse.json({ notified: list.length });

@@ -14,6 +14,7 @@ export interface Filters {
   priority: Priority | "all";
   allDone: boolean;
   declined: boolean;
+  archived: boolean;
 }
 
 export interface ProjectInit {
@@ -50,7 +51,7 @@ function makeStore(init: ProjectInit) {
     ...init,
     taskMap: toMap(init.tasks),
     flash: {},
-    filters: { q: "", mine: false, priority: "all", allDone: false, declined: false },
+    filters: { q: "", mine: false, priority: "all", allDone: false, declined: false, archived: false },
     inviteOpen: false,
     gone: false,
     setGone: (gone) => set({ gone }),
@@ -93,11 +94,14 @@ export function ProjectProvider({ init, children }: { init: ProjectInit; childre
     };
     const refetchMembers = async () => {
       if (store.getState().gone) return;
-      const { data } = await sb
+      let { data } = await sb
         .from("project_members")
-        .select("*, profile:profiles(id,email,full_name)")
+        .select("*, profile:profiles(id,email,full_name,avatar_url)")
         .eq("project_id", project.id)
         .order("joined_at");
+      if (!data) {
+        ({ data } = await sb.from("project_members").select("*, profile:profiles(id,email,full_name)").eq("project_id", project.id).order("joined_at"));
+      }
       if (!data) return;
       const list = data as unknown as Member[];
       store.getState().setMembers(list);
@@ -130,7 +134,11 @@ export function ProjectProvider({ init, children }: { init: ProjectInit; childre
       const byOther = task.updated_by !== me.id;
       const moved = !!prev && (prev.status !== task.status || prev.position !== task.position);
       if (moved && byOther) withTransition(() => s.upsertTask(task, { flash: true }));
-      else s.upsertTask(task, { flash: byOther });
+      else {
+        // The work clock starting / stopping changes the row without touching updated_at: no flash for that.
+        const timerOnly = !!prev && prev.status === task.status && prev.updated_at === task.updated_at;
+        s.upsertTask(task, { flash: byOther && !timerOnly });
+      }
       if (byOther && prev && prev.status !== task.status) {
         const who = s.members.find((m) => m.user_id === task.updated_by)?.profile.full_name ?? "Someone";
         const d = describeMove(prev.status, task.status, `${project.key}-${task.number}`);
@@ -158,10 +166,21 @@ export function ProjectProvider({ init, children }: { init: ProjectInit; childre
         connectedBefore = true;
       });
 
+    // When I rename myself in Account settings, update my row in this project's team list too.
+    let myName = app.getState().me.full_name;
+    const unsubApp = app.subscribe(() => {
+      const n = app.getState().me.full_name;
+      if (n === myName) return;
+      myName = n;
+      const s = store.getState();
+      s.setMembers(s.members.map((m) => (m.user_id === me.id ? { ...m, profile: { ...m.profile, full_name: n } } : m)));
+    });
+
     const onVisible = () => document.visibilityState === "visible" && refetchTasks();
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
+      unsubApp();
       sb.removeChannel(ch);
     };
   }, [store, app]);

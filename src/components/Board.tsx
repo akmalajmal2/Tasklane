@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
-import { deleteTask, reorderTask, setDecisionFiles, transitionTask } from "@/app/actions";
+import { archiveDone, deleteTask, reorderTask, setDecisionFiles, transitionTask } from "@/app/actions";
 import { uploadFiles } from "@/lib/files";
 import { createClient } from "@/lib/supabase/client";
 import { withTransition } from "@/lib/motion";
@@ -20,7 +20,7 @@ import { Icon } from "./ui";
 
 const DONE_WINDOW_MS = 14 * 864e5;
 /** Lanes whose order is set by hand (the others are ordered by date). */
-const MANUAL: Status[] = ["todo", "in_progress", "in_review", "testing"];
+const MANUAL: Status[] = ["todo", "in_progress", "on_hold", "in_review", "testing"];
 
 export function Board() {
   const api = useProjectApi();
@@ -65,6 +65,7 @@ export function Board() {
   }, [linked, pathname]);
 
   const names = useMemo(() => new Map(members.map((m) => [m.user_id, m.profile.full_name])), [members]);
+  const photos = useMemo(() => new Map(members.map((m) => [m.user_id, m.profile.avatar_url])), [members]);
   const ref = useCallback((t: Task) => `${project.key}-${t.number}`, [project.key]);
 
   /* ------------------------------------------------------------ moving cards */
@@ -72,6 +73,11 @@ export function Board() {
     async (task: Task, move: Move, note?: string, pos?: number, files: File[] = []) => {
       const s = api.getState();
       const label = ref(task);
+      // Starting work parks my other In-progress cards on hold (the database does the same, atomically).
+      const parked: Task[] =
+        move.to === "in_progress" && (task.assignee_id ?? me.id) === me.id
+          ? Object.values(api.getState().taskMap).filter((o) => o.id !== task.id && o.assignee_id === me.id && o.status === "in_progress")
+          : [];
       // Close the drawer so the card visibly travels to its new column.
       setOpenId((cur) => (cur === task.id ? null : cur));
       // Optimistic: the card moves instantly (animated); the database has the final say.
@@ -86,13 +92,16 @@ export function Board() {
             last_decision_note:
               (move.to === "in_progress" || move.to === "declined" || (move.to === "todo" && move.kind === "reject")) && note
                 ? note
-                : move.to === "in_progress" || move.kind === "pause"
+                : move.to === "in_progress" || move.to === "on_hold" || move.kind === "pause"
                   ? task.last_decision_note
                   : null,
           },
           { force: true },
         ),
       );
+      if (parked.length) {
+        withTransition(() => parked.forEach((o) => api.getState().upsertTask({ ...o, status: "on_hold", position: Date.now() }, { force: true })));
+      }
       const r = await transitionTask(task.id, task.status, move.to, note, move.kind === "override");
       if (r.ok) {
         s.upsertTask(r.data, { force: true });
@@ -114,11 +123,17 @@ export function Board() {
         }
         const d = describeMove(task.status, move.to, label);
         app.getState().toast({ text: `You ${d.text}`, tone: d.tone === "danger" ? "info" : d.tone });
+        if (parked.length) {
+          app.getState().toast({ text: `${parked.map(ref).join(", ")} moved to On hold. Only one task runs at a time.`, tone: "info" });
+        }
       } else {
         app.getState().toast({ text: r.error, tone: "danger" });
         // Never trust the optimistic copy or the old snapshot: show what the database actually says.
         const { data } = await createClient().from("tasks").select("*").eq("id", task.id).maybeSingle();
-        withTransition(() => s.upsertTask((data as Task | null) ?? task, { force: true }));
+        withTransition(() => {
+          s.upsertTask((data as Task | null) ?? task, { force: true });
+          parked.forEach((o) => s.upsertTask(o, { force: true }));
+        });
       }
     },
     [api, app, me.id, ref, ctx.isManager],
@@ -183,12 +198,18 @@ export function Board() {
   /* -------------------------------------------------------------- filtering */
   const columns = useMemo(() => {
     const q = filters.q.trim().toLowerCase();
-    const out: Record<Status, Task[]> = { proposed: [], declined: [], todo: [], in_progress: [], in_review: [], testing: [], done: [] };
+    const out: Record<Status, Task[]> = { proposed: [], declined: [], todo: [], in_progress: [], on_hold: [], in_review: [], testing: [], done: [] };
     let hiddenDone = 0;
+    let archived = 0;
     for (const t of Object.values(taskMap)) {
       if (filters.mine && t.assignee_id !== me.id) continue;
       if (filters.priority !== "all" && t.priority !== filters.priority) continue;
       if (q && !t.title.toLowerCase().includes(q) && !`${project.key}-${t.number}`.toLowerCase().includes(q)) continue;
+      if (t.archived_at) {
+        archived++;
+        if (filters.archived) out.done.push(t);
+        continue;
+      }
       if (t.status === "done" && !filters.allDone && t.completed_at && now && now - new Date(t.completed_at).getTime() > DONE_WINDOW_MS) {
         hiddenDone++;
         continue;
@@ -204,8 +225,24 @@ export function Board() {
             : (a, b) => a.position - b.position || a.created_at.localeCompare(b.created_at),
       );
     }
-    return { out, hiddenDone };
+    return { out, hiddenDone, archived };
   }, [taskMap, filters, me.id, project.key, now]);
+
+  /** Completed tasks that are not archived yet (what "Archive all" would move off the board). */
+  const doneOpen = useMemo(() => Object.values(taskMap).filter((t) => t.status === "done" && !t.archived_at).length, [taskMap]);
+
+  const archiveAll = async () => {
+    const ok = await app.getState().ask({
+      title: "Archive completed tasks?",
+      body: `${doneOpen} completed ${doneOpen === 1 ? "task leaves" : "tasks leave"} the board. They stay searchable under "Archived" and can be restored.`,
+      confirmLabel: "Archive",
+    });
+    if (!ok) return;
+    const r = await archiveDone(project.id);
+    if (!r.ok) return app.getState().toast({ text: r.error, tone: "danger" });
+    withTransition(() => r.data.forEach((t) => api.getState().upsertTask(t, { force: true })));
+    app.getState().toast({ text: `${r.data.length} ${r.data.length === 1 ? "task" : "tasks"} archived`, tone: "success" });
+  };
 
   const valid = useMemo(() => (drag ? new Set(movesFor(drag, ctx).map((m) => m.to)) : null), [drag, ctx]);
   const override = useMemo(() => (drag ? new Set(overrideMoves(drag, ctx).map((m) => m.to)) : null), [drag, ctx]);
@@ -278,6 +315,12 @@ export function Board() {
             <span>All completed{columns.hiddenDone > 0 ? ` (+${columns.hiddenDone})` : ""}</span>
           </label>
         ) : null}
+        {columns.archived > 0 || filters.archived ? (
+          <label className="check">
+            <input type="checkbox" checked={filters.archived} onChange={(e) => withTransition(() => setFilters({ archived: e.target.checked }))} />
+            <span>Archived ({columns.archived})</span>
+          </label>
+        ) : null}
         {columns.out.declined.length > 0 || filters.declined ? (
           <label className="check">
             <input type="checkbox" checked={filters.declined} onChange={(e) => withTransition(() => setFilters({ declined: e.target.checked }))} />
@@ -319,7 +362,12 @@ export function Board() {
             >
               <header className="col-head">
                 <h2>{c.label}</h2>
-                <span className="count" key={list.length}>{list.length}</span>
+                <span className="count" key={`n-${list.length}`}>{list.length}</span>
+                {c.id === "done" && ctx.isManager && doneOpen > 0 && (
+                  <button type="button" className="btn subtle sm col-action" title="Move every completed task off the board" onClick={() => void archiveAll()}>
+                    <Icon n="archive" size={12} /> Archive all
+                  </button>
+                )}
               </header>
               <p className="col-hint">{hint}</p>
               <div className="col-body">
@@ -342,6 +390,7 @@ export function Board() {
                           index={i}
                           refKey={ref(t)}
                           assignee={t.assignee_id ? names.get(t.assignee_id) : undefined}
+                          assigneePhoto={t.assignee_id ? photos.get(t.assignee_id) : undefined}
                           proposer={t.reporter_id ? names.get(t.reporter_id) : undefined}
                           now={now}
                           flash={flash[t.id] ?? 0}

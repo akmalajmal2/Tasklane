@@ -9,6 +9,7 @@ import type { Member, ProjectRole, Task } from "@/lib/types";
 import { withTransition } from "@/lib/motion";
 import { useApp, useAppApi } from "@/store/app-store";
 import { useProject, useProjectApi } from "@/store/project-store";
+import { TaskTimer } from "./TaskCard";
 import { Avatar, Icon } from "./ui";
 
 export function MembersView() {
@@ -89,7 +90,7 @@ export function MembersView() {
                 <tr className="member-row" data-late={late > 0}>
                   <td>
                     <div className="person">
-                      <Avatar name={m.profile.full_name} size={32} />
+                      <Avatar name={m.profile.full_name} size={32} src={m.profile.avatar_url} />
                       <div>{m.profile.full_name}{m.user_id === meId && " (you)"}<small>{m.profile.email}</small></div>
                     </div>
                   </td>
@@ -123,6 +124,7 @@ export function MembersView() {
                               <span className="m" suppressHydrationWarning>{t.started_at && now ? `Started ${duration(now - new Date(t.started_at).getTime())} ago` : "In progress"}</span>
                               <span className="m" suppressHydrationWarning>{d.overdue || d.label.startsWith("Due") ? d.label : `Due ${d.label}`}</span>
                               <span className="m">{t.estimate_hours != null ? `${t.estimate_hours}h` : "—"}</span>
+                              <span className="m"><TaskTimer task={t} /></span>
                             </NavLink>
                           );
                         })}

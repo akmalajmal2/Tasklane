@@ -10,7 +10,7 @@ export interface StoreApi<S> {
   subscribe: (listener: () => void) => () => void;
 }
 
-export function createStore<S>(init: (set: StoreApi<S>["setState"]) => S): StoreApi<S> {
+export function createStore<S>(init: (set: StoreApi<S>["setState"], get: () => S) => S): StoreApi<S> {
   let state: S;
   const listeners = new Set<() => void>();
   const setState: StoreApi<S>["setState"] = (partial) => {
@@ -19,7 +19,7 @@ export function createStore<S>(init: (set: StoreApi<S>["setState"]) => S): Store
     state = { ...state, ...next };
     listeners.forEach((l) => l());
   };
-  state = init(setState);
+  state = init(setState, () => state);
   return { getState: () => state, setState, subscribe: (l) => (listeners.add(l), () => void listeners.delete(l)) };
 }
 

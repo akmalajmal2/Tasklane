@@ -13,7 +13,7 @@
 create extension if not exists pgcrypto;
 
 create type public.project_role  as enum ('manager', 'developer', 'tester');
-create type public.task_status   as enum ('proposed', 'declined', 'todo', 'in_progress', 'in_review', 'testing', 'done');
+create type public.task_status   as enum ('proposed', 'declined', 'todo', 'in_progress', 'on_hold', 'in_review', 'testing', 'done');
 create type public.task_priority as enum ('low', 'medium', 'high', 'urgent');
 create type public.invite_status as enum ('pending', 'accepted', 'declined', 'revoked');
 
@@ -914,5 +914,467 @@ end $$;
 revoke execute on function public.set_decision_files(uuid, jsonb) from public, anon;
 grant  execute on function public.set_decision_files(uuid, jsonb) to authenticated;
 revoke execute on function public._clear_decision_files() from public, anon, authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ------------------------------------------------------- v11: comments, e-mail preferences, profile name, clear notifications, archive
+-- (Already part of this file for new databases. Existing databases run migration-v11-comments-prefs-archive.sql instead.)
+
+-- ============================================================ profile: name + e-mail preferences
+alter table public.profiles add column if not exists mute_email text[] not null default '{}';
+
+-- Which preference group a notification kind belongs to. NULL = always e-mailed (e.g. invitations).
+create or replace function public._email_group(p_kind text)
+returns text language sql immutable as $$
+  select case
+    when p_kind in ('assigned', 'unassigned')                                   then 'assignments'
+    when p_kind in ('proposal', 'proposal_approved', 'proposal_declined')       then 'proposals'
+    when p_kind in ('moved', 'review_requested', 'testing_requested', 'approved', 'rejected',
+                    'test_passed', 'test_failed', 'reopened')                   then 'reviews'
+    when p_kind = 'overdue'                                                     then 'overdue'
+    when p_kind = 'comment'                                                     then 'comments'
+    else null
+  end
+$$;
+
+-- Same behaviour as before, except: a muted group is still shown in the app, but no e-mail payload is returned.
+create or replace function public._notify(
+  p_user uuid, p_project uuid, p_task uuid, p_kind text, p_title text, p_body text, p_link text
+) returns jsonb language plpgsql security definer set search_path = public as $$
+declare pr public.profiles;
+begin
+  select * into pr from public.profiles where id = p_user;
+  if not found then return '[]'::jsonb; end if;
+  insert into public.notifications (user_id, project_id, task_id, kind, title, body, link)
+  values (p_user, p_project, p_task, p_kind, p_title, p_body, p_link);
+  if public._email_group(p_kind) = any (pr.mute_email) then return '[]'::jsonb; end if;
+  return jsonb_build_object('email', pr.email, 'name', pr.full_name,
+                            'title', p_title, 'body', p_body, 'link', p_link);
+end $$;
+revoke all on function public._notify(uuid, uuid, uuid, text, text, text, text) from public, anon, authenticated;
+
+create or replace function public.update_my_profile(p_name text, p_mute text[])
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); n text := btrim(coalesce(p_name, '')); mute text[];
+begin
+  if me is null then raise exception 'Not signed in'; end if;
+  if char_length(n) < 1 or char_length(n) > 80 then raise exception 'Enter your name (1 to 80 characters)'; end if;
+  select coalesce(array_agg(distinct g), '{}') into mute
+    from unnest(coalesce(p_mute, '{}')) g
+   where g in ('assignments', 'proposals', 'reviews', 'overdue', 'comments');
+  update public.profiles set full_name = n, mute_email = mute where id = me;
+  return jsonb_build_object('full_name', n, 'mute_email', to_jsonb(mute));
+end $$;
+revoke execute on function public.update_my_profile(text, text[]) from public, anon;
+grant  execute on function public.update_my_profile(text, text[]) to authenticated;
+
+-- ============================================================ task comments
+create table if not exists public.task_comments (
+  id          uuid primary key default gen_random_uuid(),
+  task_id     uuid not null references public.tasks (id) on delete cascade,
+  project_id  uuid not null references public.projects (id) on delete cascade,
+  author_id   uuid references public.profiles (id) on delete set null,
+  body        text not null check (char_length(body) between 1 and 2000),
+  created_at  timestamptz not null default now()
+);
+create index if not exists task_comments_task_idx on public.task_comments (task_id, created_at);
+
+alter table public.task_comments enable row level security;
+drop policy if exists comments_read on public.task_comments;
+create policy comments_read on public.task_comments for select to authenticated using (public.can_view(project_id));
+revoke all on public.task_comments from anon;
+revoke insert, update, delete on public.task_comments from authenticated;
+grant select on public.task_comments to authenticated;
+
+create or replace function public.add_comment(p_task uuid, p_body text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := auth.uid(); t public.tasks; pr public.projects; c public.task_comments;
+  v_body text := btrim(coalesce(p_body, '')); actor text; lnk text; target uuid; out jsonb := '[]'::jsonb;
+begin
+  if me is null then raise exception 'Not signed in'; end if;
+  select * into t from public.tasks where id = p_task;
+  if not found then raise exception 'Task not found'; end if;
+  if not public.can_view(t.project_id) then raise exception 'You do not have access to this project'; end if;
+  if char_length(v_body) < 1 then raise exception 'Write a comment first'; end if;
+  if char_length(v_body) > 2000 then raise exception 'Comments are limited to 2000 characters'; end if;
+
+  insert into public.task_comments (task_id, project_id, author_id, body)
+  values (t.id, t.project_id, me, v_body) returning * into c;
+
+  select * into pr from public.projects where id = t.project_id;
+  select full_name into actor from public.profiles where id = me;
+  lnk := '/projects/' || t.project_id || '?task=' || t.id;
+  -- Tell the assignee and the person who proposed it (never the author), if they are still on the project.
+  for target in
+    select distinct x from (values (t.assignee_id), (t.reporter_id)) v(x)
+     where x is not null and x <> me
+       and exists (select 1 from public.project_members m where m.project_id = t.project_id and m.user_id = x)
+  loop
+    out := out || public._notify(target, t.project_id, t.id, 'comment',
+             coalesce(actor, 'Someone') || ' commented on ' || pr.key || '-' || t.number, left(v_body, 140), lnk);
+  end loop;
+  return jsonb_build_object('comment', to_jsonb(c), 'notified', out);
+end $$;
+revoke execute on function public.add_comment(uuid, text) from public, anon;
+grant  execute on function public.add_comment(uuid, text) to authenticated;
+
+create or replace function public.delete_comment(p_comment uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare c public.task_comments;
+begin
+  if auth.uid() is null then raise exception 'Not signed in'; end if;
+  select * into c from public.task_comments where id = p_comment;
+  if not found then raise exception 'Comment not found'; end if;
+  if not (c.author_id = auth.uid() or public.can_manage(c.project_id)) then
+    raise exception 'You can only delete your own comments';
+  end if;
+  delete from public.task_comments where id = c.id;
+end $$;
+revoke execute on function public.delete_comment(uuid) from public, anon;
+grant  execute on function public.delete_comment(uuid) to authenticated;
+
+alter table public.task_comments replica identity full;
+do $$
+begin
+  if not exists (select 1 from pg_publication_tables
+                 where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'task_comments') then
+    alter publication supabase_realtime add table public.task_comments;
+  end if;
+end $$;
+
+-- ============================================================ clear notifications
+create or replace function public.clear_notifications(p_ids uuid[] default null)
+returns integer language plpgsql security definer set search_path = public as $$
+declare n integer;
+begin
+  if auth.uid() is null then raise exception 'Not signed in'; end if;
+  delete from public.notifications where user_id = auth.uid() and (p_ids is null or id = any (p_ids));
+  get diagnostics n = row_count;
+  return n;
+end $$;
+revoke execute on function public.clear_notifications(uuid[]) from public, anon;
+grant  execute on function public.clear_notifications(uuid[]) to authenticated;
+
+-- ============================================================ archive completed tasks
+alter table public.tasks add column if not exists archived_at timestamptz;
+
+-- A card that leaves "Completed" (reopened, moved) is automatically un-archived.
+create or replace function public._clear_archive()
+returns trigger language plpgsql as $$
+begin
+  if new.status is distinct from 'done' and new.archived_at is not null then new.archived_at := null; end if;
+  return new;
+end $$;
+drop trigger if exists tasks_clear_archive on public.tasks;
+create trigger tasks_clear_archive before update on public.tasks
+  for each row execute function public._clear_archive();
+
+create or replace function public.archive_task(p_task uuid, p_archive boolean)
+returns public.tasks language plpgsql security definer set search_path = public as $$
+declare t public.tasks; me uuid := auth.uid();
+begin
+  if me is null then raise exception 'Not signed in'; end if;
+  select * into t from public.tasks where id = p_task for update;
+  if not found then raise exception 'Task not found'; end if;
+  if not public.can_manage(t.project_id) then raise exception 'Only a manager can archive or restore tasks'; end if;
+  if t.status <> 'done' then raise exception 'Only completed tasks can be archived'; end if;
+  update public.tasks
+     set archived_at = case when p_archive then now() else null end, updated_by = me, updated_at = now()
+   where id = t.id returning * into t;
+  insert into public.task_events (task_id, project_id, actor_id, kind)
+  values (t.id, t.project_id, me, case when p_archive then 'archived' else 'unarchived' end);
+  return t;
+end $$;
+revoke execute on function public.archive_task(uuid, boolean) from public, anon;
+grant  execute on function public.archive_task(uuid, boolean) to authenticated;
+
+-- Archive every completed task of a project in one go. Returns the updated rows.
+create or replace function public.archive_done(p_project uuid)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); out jsonb;
+begin
+  if me is null then raise exception 'Not signed in'; end if;
+  if not public.can_manage(p_project) then raise exception 'Only a manager can archive tasks'; end if;
+  with u as (
+    update public.tasks set archived_at = now(), updated_by = me, updated_at = now()
+     where project_id = p_project and status = 'done' and archived_at is null
+    returning *
+  ), e as (
+    insert into public.task_events (task_id, project_id, actor_id, kind)
+    select id, project_id, me, 'archived' from u
+    returning 1
+  )
+  select coalesce(jsonb_agg(to_jsonb(u)), '[]'::jsonb) into out from u;
+  return out;
+end $$;
+revoke execute on function public.archive_done(uuid) from public, anon;
+grant  execute on function public.archive_done(uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ------------------------------------------------------- v12: profile photo, On hold lane, work timer
+-- (Already part of this file for new databases. Existing databases run migration-v12a, then migration-v12b.)
+-- =====================================================================
+-- v12: profile photo, "On hold" lane, work timer
+--   * profiles.avatar_url      small JPEG (data URL) captured at sign-up step 2
+--   * tasks.worked_seconds / timer_started_at / timer_pause_reason
+--   * only ONE in-progress task per person: starting another moves the
+--     current one to On hold and stops its clock (done by a trigger, so every
+--     path through the app is covered)
+--   * set_task_timer()         called by the browser when the camera / idle
+--                              detector says the person is there or away
+--   * transition_task()        now also handles In progress <-> On hold
+-- =====================================================================
+
+-- ------------------------------------------------------------ profile photo
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles drop constraint if exists profiles_avatar_ok;
+alter table public.profiles add constraint profiles_avatar_ok
+  check (avatar_url is null or (avatar_url like 'data:image/jpeg;base64,%' and length(avatar_url) <= 60000));
+
+-- Sign-up sends the photo inside the user metadata; copy it to the profile and drop it from the
+-- metadata so it does not travel in every session token.
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare av text := new.raw_user_meta_data ->> 'avatar';
+begin
+  insert into public.profiles (id, email, full_name, is_admin, avatar_url)
+  values (
+    new.id,
+    new.email,
+    coalesce(nullif(new.raw_user_meta_data ->> 'full_name', ''), split_part(new.email, '@', 1)),
+    not exists (select 1 from public.profiles),
+    case when av like 'data:image/jpeg;base64,%' and length(av) <= 60000 then av end
+  );
+  if av is not null then
+    update auth.users set raw_user_meta_data = raw_user_meta_data - 'avatar' where id = new.id;
+  end if;
+  return new;
+end $$;
+
+create or replace function public.set_my_avatar(p_avatar text)
+returns text language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'Not signed in'; end if;
+  if p_avatar is not null and not (p_avatar like 'data:image/jpeg;base64,%' and length(p_avatar) <= 60000) then
+    raise exception 'That photo could not be used. Take it again.';
+  end if;
+  update public.profiles set avatar_url = p_avatar where id = auth.uid();
+  return p_avatar;
+end $$;
+
+-- ------------------------------------------------------------ timer columns
+alter table public.tasks add column if not exists worked_seconds     integer not null default 0;
+alter table public.tasks add column if not exists timer_started_at   timestamptz;      -- set while the clock runs
+alter table public.tasks add column if not exists timer_pause_reason text;              -- away / idle / locked / sleep / camera / offline
+
+-- Last sign of life from the browser that runs the clock. Kept out of `tasks` so heartbeats do not
+-- generate realtime traffic. If a browser dies, time is only counted up to its last heartbeat + 2 min.
+create table if not exists public.task_timer_pings (
+  task_id uuid primary key references public.tasks (id) on delete cascade,
+  ping_at timestamptz not null default now()
+);
+alter table public.task_timer_pings enable row level security;
+revoke all on public.task_timer_pings from anon, authenticated;
+
+-- ------------------------------------------------- one active task per person
+create or replace function public._tasks_timer_guard()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare ping timestamptz; stop_at timestamptz; other record;
+begin
+  -- A held card always has an owner (e.g. when its owner is removed from the project).
+  if new.status = 'on_hold' and new.assignee_id is null then new.status := 'todo'; end if;
+
+  if new.status is not distinct from old.status and new.assignee_id is not distinct from old.assignee_id then
+    return new;
+  end if;
+
+  -- Stop the clock when the card leaves In progress or changes hands.
+  if old.timer_started_at is not null and (new.status <> 'in_progress' or new.assignee_id is distinct from old.assignee_id) then
+    select ping_at into ping from public.task_timer_pings where task_id = old.id;
+    stop_at := least(now(), coalesce(ping, old.timer_started_at) + interval '2 minutes');
+    new.worked_seconds := old.worked_seconds + greatest(0, floor(extract(epoch from stop_at - old.timer_started_at)))::int;
+    new.timer_started_at := null;
+    new.timer_pause_reason := null;
+  end if;
+
+  if new.status = 'in_progress' and (old.status <> 'in_progress' or new.assignee_id is distinct from old.assignee_id) then
+    -- The assignee starting or resuming their own card starts the clock; any other way in
+    -- (reopened, failed testing, manager override) waits until the assignee is back at the camera.
+    if new.assignee_id is not null and new.assignee_id = auth.uid() and old.status in ('todo', 'on_hold') then
+      new.timer_started_at := now();
+      new.timer_pause_reason := null;
+      insert into public.task_timer_pings (task_id, ping_at) values (new.id, now())
+        on conflict (task_id) do update set ping_at = now();
+    else
+      new.timer_started_at := null;
+      new.timer_pause_reason := 'waiting';
+    end if;
+
+    -- Only one card in progress per person: park the others on hold.
+    if new.assignee_id is not null then
+      for other in select id, project_id from public.tasks
+                    where assignee_id = new.assignee_id and status = 'in_progress' and id <> new.id for update loop
+        update public.tasks set status = 'on_hold', updated_by = coalesce(new.updated_by, auth.uid()), updated_at = now()
+         where id = other.id;
+        insert into public.task_events (task_id, project_id, actor_id, kind, from_status, to_status, note)
+        values (other.id, other.project_id, coalesce(new.updated_by, auth.uid()), 'moved', 'in_progress', 'on_hold',
+                'Paused automatically because another task was started');
+      end loop;
+    end if;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists tasks_timer_guard on public.tasks;
+create trigger tasks_timer_guard before update on public.tasks
+  for each row execute function public._tasks_timer_guard();
+
+-- ------------------------------------------------------------ start / stop the clock
+-- Called by the assignee's browser. p_running = true also acts as the heartbeat.
+create or replace function public.set_task_timer(p_task uuid, p_running boolean, p_reason text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare t public.tasks; me uuid := auth.uid(); ping timestamptz; stop_at timestamptz;
+begin
+  if me is null then raise exception 'Not signed in'; end if;
+  select * into t from public.tasks where id = p_task for update;
+  if not found then raise exception 'Task not found'; end if;
+  if t.assignee_id is distinct from me or t.status <> 'in_progress' then
+    raise exception 'STALE: this task is no longer in progress for you';
+  end if;
+
+  if p_running then
+    if t.timer_started_at is null then
+      update public.tasks set timer_started_at = now(), timer_pause_reason = null where id = t.id returning * into t;
+    end if;
+    insert into public.task_timer_pings (task_id, ping_at) values (t.id, now())
+      on conflict (task_id) do update set ping_at = now();
+  elsif t.timer_started_at is not null then
+    select ping_at into ping from public.task_timer_pings where task_id = t.id;
+    stop_at := least(now(), coalesce(ping, t.timer_started_at) + interval '2 minutes');
+    update public.tasks set
+      worked_seconds = worked_seconds + greatest(0, floor(extract(epoch from stop_at - t.timer_started_at)))::int,
+      timer_started_at = null,
+      timer_pause_reason = left(coalesce(nullif(btrim(p_reason), ''), 'away'), 20)
+    where id = t.id returning * into t;
+  elsif t.timer_pause_reason is distinct from left(coalesce(nullif(btrim(p_reason), ''), 'away'), 20) then
+    update public.tasks set timer_pause_reason = left(coalesce(nullif(btrim(p_reason), ''), 'away'), 20)
+     where id = t.id returning * into t;
+  end if;
+  return to_jsonb(t);
+end $$;
+
+-- Safety net for browsers that vanished while the clock was running (call from the cron route).
+create or replace function public.sweep_stale_timers()
+returns integer language plpgsql security definer set search_path = public as $$
+declare r record; n integer := 0;
+begin
+  for r in select t.id, t.timer_started_at, coalesce(p.ping_at, t.timer_started_at) as last_ping
+             from public.tasks t left join public.task_timer_pings p on p.task_id = t.id
+            where t.status = 'in_progress' and t.timer_started_at is not null
+              and coalesce(p.ping_at, t.timer_started_at) < now() - interval '3 minutes' loop
+    update public.tasks set
+      worked_seconds = worked_seconds + greatest(0, floor(extract(epoch from least(now(), r.last_ping + interval '2 minutes') - r.timer_started_at)))::int,
+      timer_started_at = null, timer_pause_reason = 'offline'
+    where id = r.id;
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+
+-- ------------------------------------------------------------ workflow: On hold
+-- The existing transition_task() keeps doing everything it did; this wrapper only adds the
+-- In progress <-> On hold moves (and On hold -> To do). Re-running this file is safe, and it
+-- re-wraps the function if an older migration replaced it.
+do $$
+declare src text;
+begin
+  select prosrc into src from pg_proc
+   where proname = 'transition_task' and pronamespace = 'public'::regnamespace and pronargs = 5;
+  if src is not null and src not like '%_transition_task_core%' then
+    drop function if exists public._transition_task_core(uuid, public.task_status, public.task_status, text, boolean);
+    alter function public.transition_task(uuid, public.task_status, public.task_status, text, boolean)
+      rename to _transition_task_core;
+  end if;
+end $$;
+
+create or replace function public.transition_task(
+  p_task uuid, p_from public.task_status, p_to public.task_status, p_note text default null,
+  p_override boolean default false
+) returns jsonb language plpgsql security definer set search_path = public as $$
+declare t public.tasks; me uuid := auth.uid();
+begin
+  if not coalesce(p_override, false) and (p_from = 'on_hold' or p_to = 'on_hold') then
+    if me is null then raise exception 'Not signed in'; end if;
+    select * into t from public.tasks where id = p_task for update;
+    if not found then raise exception 'Task not found'; end if;
+    if t.status <> p_from then
+      raise exception 'STALE: this card was already moved to %', replace(t.status::text, '_', ' ');
+    end if;
+    if not ((p_from = 'in_progress' and p_to = 'on_hold') or (p_from = 'on_hold' and p_to in ('in_progress', 'todo'))) then
+      raise exception 'That move is not allowed in this workflow';
+    end if;
+    if t.assignee_id is distinct from me then
+      raise exception 'Only the person this task is assigned to can put it on hold or resume it';
+    end if;
+    update public.tasks set
+      status = p_to,
+      started_at = case when p_to = 'in_progress' then coalesce(started_at, now()) else started_at end,
+      updated_by = me, updated_at = now()
+    where id = t.id returning * into t;
+    insert into public.task_events (task_id, project_id, actor_id, kind, from_status, to_status)
+    values (t.id, t.project_id, me, 'moved', p_from, p_to);
+    return jsonb_build_object('task', to_jsonb(t), 'notified', '[]'::jsonb);
+  end if;
+  return public._transition_task_core(p_task, p_from, p_to, p_note, coalesce(p_override, false));
+end $$;
+
+-- ------------------------------------------------------------ permissions
+revoke execute on function public._transition_task_core(uuid, public.task_status, public.task_status, text, boolean) from public, anon, authenticated;
+revoke execute on function public.transition_task(uuid, public.task_status, public.task_status, text, boolean) from public, anon;
+grant  execute on function public.transition_task(uuid, public.task_status, public.task_status, text, boolean) to authenticated, service_role;
+revoke execute on function public.set_task_timer(uuid, boolean, text) from public, anon;
+grant  execute on function public.set_task_timer(uuid, boolean, text) to authenticated;
+revoke execute on function public.set_my_avatar(text) from public, anon;
+grant  execute on function public.set_my_avatar(text) to authenticated;
+revoke all on function public.sweep_stale_timers() from public, anon, authenticated;
+grant  execute on function public.sweep_stale_timers() to service_role;
+revoke all on function public._tasks_timer_guard() from public, anon, authenticated;
+revoke all on function public.handle_new_user() from public, anon, authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ------------------------------------------------------- v13: ensure_my_profile (see migration-v13-ensure-profile.sql)
+create or replace function public.ensure_my_profile()
+returns void language plpgsql security definer set search_path = public as $$
+declare u auth.users;
+begin
+  if auth.uid() is null then raise exception 'Not signed in'; end if;
+  select * into u from auth.users where id = auth.uid();
+  if not found then return; end if;
+  insert into public.profiles (id, email, full_name, is_admin)
+  values (
+    u.id, u.email,
+    coalesce(nullif(u.raw_user_meta_data ->> 'full_name', ''), split_part(u.email, '@', 1)),
+    not exists (select 1 from public.profiles)
+  )
+  on conflict (id) do nothing;
+end $$;
+
+revoke execute on function public.ensure_my_profile() from public, anon;
+grant  execute on function public.ensure_my_profile() to authenticated;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users for each row execute function public.handle_new_user();
+
+insert into public.profiles (id, email, full_name, is_admin)
+select u.id, u.email,
+       coalesce(nullif(u.raw_user_meta_data ->> 'full_name', ''), split_part(u.email, '@', 1)),
+       not exists (select 1 from public.profiles)
+from auth.users u
+left join public.profiles p on p.id = u.id
+where p.id is null;
 
 notify pgrst, 'reload schema';

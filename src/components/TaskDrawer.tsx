@@ -1,19 +1,23 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition } from "react";
+import { archiveTask } from "@/app/actions";
+import { withTransition } from "@/lib/motion";
+import { useAppApi } from "@/store/app-store";
 import { dueInfo, fmtDate, fmtDateTime } from "@/lib/format";
 import { createClient } from "@/lib/supabase/client";
 import { fmtSize, isImage, signedUrls } from "@/lib/files";
 import { STATUS_LABEL, canDelete, canEdit, movesFor, overrideMoves } from "@/lib/workflow";
 import type { DecisionFile, Status, TaskEvent } from "@/lib/types";
 import { useNow } from "@/lib/useNow";
-import { useProject } from "@/store/project-store";
+import { useProject, useProjectApi } from "@/store/project-store";
 import { useBoard } from "./board-context";
-import { PriorityIcon } from "./TaskCard";
-import { Avatar, Icon, Modal } from "./ui";
+import { PriorityIcon, TaskTimer } from "./TaskCard";
+import { TaskComments } from "./TaskComments";
+import { Avatar, Icon, Modal, Spinner } from "./ui";
 
 const TONE: Record<Status, string | undefined> = {
-  proposed: "violet", declined: "danger", todo: undefined, in_progress: "brand", in_review: "violet", testing: "warn", done: "ok",
+  proposed: "violet", declined: "danger", todo: undefined, in_progress: "brand", on_hold: "warn", in_review: "violet", testing: "warn", done: "ok",
 };
 
 export function TaskDrawer({ taskId, onClose }: { taskId: string | null; onClose: () => void }) {
@@ -33,6 +37,9 @@ function Body({ id, onClose }: { id: string; onClose: () => void }) {
   const project = useProject((s) => s.project);
   const members = useProject((s) => s.members);
   const board = useBoard();
+  const api = useProjectApi();
+  const app = useAppApi();
+  const [archiving, startArchive] = useTransition();
   const now = useNow();
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const stamp = task?.updated_at;
@@ -70,12 +77,24 @@ function Body({ id, onClose }: { id: string; onClose: () => void }) {
   const pendingTask = task.status === "proposed" || task.status === "declined";
   const isOwner = task.reporter_id === board.ctx.userId;
   const withdraw = !isManager && mayDelete;
+  const archived = !!task.archived_at;
+
+  const toggleArchive = (archive: boolean) =>
+    startArchive(async () => {
+      const r = await archiveTask(task.id, archive);
+      if (!r.ok) return app.getState().toast({ text: r.error, tone: "danger" });
+      withTransition(() => api.getState().upsertTask(r.data, { force: true }));
+      app.getState().toast({ text: archive ? `${ref} archived` : `${ref} restored to Completed`, tone: "success" });
+      if (archive) onClose(); // an archived card leaves the board, so close its panel
+    });
 
   return (
     <div className="drawer-wrap">
       <div className="drawer-head">
         <span style={{ fontWeight: 700 }}>{ref}</span>
         <span className="chip" data-tone={TONE[task.status]}>{STATUS_LABEL[task.status]}</span>
+        <TaskTimer task={task} />
+        {archived && <span className="chip">Archived</span>}
         <span className="spacer" />
         {mayEdit && (
           <button className="icon-btn" aria-label={pendingTask && !isManager ? "Revise proposal" : "Edit task"} onClick={() => board.edit(task)} title="Edit">
@@ -97,10 +116,10 @@ function Body({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="d-title">
         <h2>{task.title}</h2>
 
-        {task.last_decision_note && (task.status === "todo" || task.status === "in_progress") && (
+        {task.last_decision_note && (task.status === "todo" || task.status === "in_progress" || task.status === "on_hold") && (
           <p className="note-callout">Changes requested: {task.last_decision_note}</p>
         )}
-        {task.last_decision_note && (task.status === "todo" || task.status === "in_progress" || task.status === "declined") && (
+        {task.last_decision_note && (task.status === "todo" || task.status === "in_progress" || task.status === "on_hold" || task.status === "declined") && (
           <FeedbackFiles files={task.last_decision_files ?? []} />
         )}
         {task.status === "proposed" && (
@@ -153,6 +172,8 @@ function Body({ id, onClose }: { id: string; onClose: () => void }) {
           {task.description ? <p className="desc">{task.description}</p> : <p style={{ color: "var(--ink-3)" }}>No description.</p>}
         </section>
 
+        <TaskComments taskId={task.id} />
+
         <section className="d-block tint">
           <h3 className="legend" style={{ marginBottom: 10 }}>Activity</h3>
           <ul className="activity">
@@ -166,6 +187,8 @@ function Body({ id, onClose }: { id: string; onClose: () => void }) {
                   {e.kind === "approved_proposal" && "approved the proposal"}
                   {e.kind === "override" && e.from_status && e.to_status && `moved it manually from ${STATUS_LABEL[e.from_status]} to ${STATUS_LABEL[e.to_status]}`}
                   {e.kind === "edited" && "edited the task"}
+                  {e.kind === "archived" && "archived the task"}
+                  {e.kind === "unarchived" && "restored the task from the archive"}
                   {e.kind === "reassigned" && "changed the assignee"}
                   {e.kind === "moved" && e.from_status && e.to_status && (e.to_status === "declined" ? "declined the proposal" : `moved it from ${STATUS_LABEL[e.from_status]} to ${STATUS_LABEL[e.to_status]}`)}
                   <br />
@@ -178,13 +201,18 @@ function Body({ id, onClose }: { id: string; onClose: () => void }) {
         </section>
       </div>
 
-      {(moves.length > 0 || overrides.length > 0 || (task.status === "todo" && !task.assignee_id && isManager) || (!isManager && isOwner && pendingTask)) && (
+      {(moves.length > 0 || overrides.length > 0 || (isManager && task.status === "done") || (task.status === "todo" && !task.assignee_id && isManager) || (!isManager && isOwner && pendingTask)) && (
         <div className="drawer-actions">
           {moves.map((m) => (
             <button key={m.kind} className={`btn ${m.tone === "primary" ? "primary" : m.tone === "danger" ? "danger" : m.kind === "pause" ? "danger-outline" : ""}`} onClick={() => board.requestMove(task, m)}>
               {m.label}
             </button>
           ))}
+          {isManager && task.status === "done" && (
+            <button className="btn" disabled={archiving} onClick={() => toggleArchive(!archived)}>
+              {archiving ? <Spinner /> : <Icon n="archive" size={14} />} {archived ? "Restore from archive" : "Archive"}
+            </button>
+          )}
           {task.status === "todo" && !task.assignee_id && isManager && (
             <button className="btn primary" onClick={() => board.edit(task)}>Assign to start</button>
           )}

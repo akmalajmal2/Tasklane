@@ -37,15 +37,20 @@ export function NotificationBell() {
   return (
     <>
       <button className="icon-btn bell" popoverTarget="notices" aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}>
-        <span key={ring} className={ring ? "bell-ico ring" : "bell-ico"}><Icon n="bell" size={18} /></span>
-        {unread > 0 && <span className="badge" key={unread}>{unread > 9 ? "9+" : unread}</span>}
+        <span key={`ring-${ring}`} className={ring ? "bell-ico ring" : "bell-ico"}><Icon n="bell" size={18} /></span>
+        {unread > 0 && <span className="badge" key={`unread-${unread}`}>{unread > 9 ? "9+" : unread}</span>}
       </button>
       <div id="notices" popover="auto" className="pop pop-notices">
         <header>
           <strong>Notifications</strong>
-          <button className="btn subtle sm" disabled={!unread} onClick={() => read("all")}>
-            Mark all read
-          </button>
+          <span className="head-actions">
+            <button className="btn subtle sm" disabled={!unread} onClick={() => read("all")}>
+              Mark all read
+            </button>
+            <button className="btn subtle sm" disabled={!notices.length} onClick={() => app.getState().clearNotices("all")}>
+              Clear all
+            </button>
+          </span>
         </header>
         {notices.length === 0 ? (
           <p className="empty">Nothing yet. You'll hear about proposals, assignments, reviews and test results here.</p>
@@ -66,6 +71,9 @@ export function NotificationBell() {
                   {n.body && <span>{n.body}</span>}
                   <time>{ago(n.created_at)}</time>
                 </Link>
+                <button type="button" className="icon-btn dismiss" aria-label="Remove this notification" onClick={() => app.getState().clearNotices([n.id])}>
+                  <Icon n="x" size={14} />
+                </button>
                 {token && pendingTokens.has(token) && (
                   <div className="notice-actions">
                     <InviteButtons token={token} compact onDone={closePop} />

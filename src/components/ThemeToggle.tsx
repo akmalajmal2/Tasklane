@@ -43,7 +43,7 @@ export function ThemeToggle({ floating = false }: { floating?: boolean }) {
       vt(() => {
         flushSync(() => setTheme(next));
         apply(next, false);
-      }).finished.finally(() => delete root.dataset.vt);
+      }).finished.catch(() => {}).finally(() => delete root.dataset.vt);
     } else {
       setTheme(next);
       apply(next);

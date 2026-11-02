@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { deliver, sendInvite } from "@/lib/email";
-import type { DecisionFile, Notified, Priority, ProjectRole, Project, Result, Status, Task } from "@/lib/types";
+import type { DecisionFile, Notified, TaskComment, Priority, ProjectRole, Project, Result, Status, Task } from "@/lib/types";
 
 /* ------------------------------------------------------------ helpers */
 
@@ -15,7 +15,7 @@ function fail(e: unknown): { ok: false; error: string; stale?: boolean } {
   if (/schema cache|Could not find the function/i.test(raw)) {
     return {
       ok: false,
-      error: "The database is out of date. Run supabase/migration-v7-sync-all.sql in the Supabase SQL Editor, then try again.",
+      error: "The database is out of date. Run the newest SQL files in supabase/ (see supabase/README.md: v7, v11, then v12a and v12b), then try again.",
     };
   }
   return { ok: false, error: raw.replace(/^STALE:\s*/, ""), stale: raw.startsWith("STALE:") };
@@ -240,6 +240,69 @@ export async function removeMember(projectId: string, userId: string): Promise<R
   try {
     await rpc("remove_member", { p_project: projectId, p_user: userId });
     return { ok: true, data: null };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/* ------------------------------------------------------------ profile */
+
+export async function updateProfile(name: string, muteEmail: string[]): Promise<Result<{ full_name: string; mute_email: string[] }>> {
+  try {
+    const r = await rpc<{ full_name: string; mute_email: string[] }>("update_my_profile", { p_name: name, p_mute: muteEmail });
+    return { ok: true, data: r };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** Replaces the profile photo (a small JPEG data URL from the camera), or removes it with null. */
+export async function updateAvatar(avatar: string | null): Promise<Result<string | null>> {
+  try {
+    const r = await rpc<string | null>("set_my_avatar", { p_avatar: avatar });
+    return { ok: true, data: r };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/* ----------------------------------------------------------- comments */
+
+export async function addComment(taskId: string, body: string): Promise<Result<TaskComment>> {
+  try {
+    const r = await rpc<{ comment: Omit<TaskComment, "author">; notified: Notified[] }>("add_comment", { p_task: taskId, p_body: body });
+    mailLater(r.notified);
+    return { ok: true, data: { ...r.comment, author: null } };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+export async function deleteComment(commentId: string): Promise<Result> {
+  try {
+    await rpc("delete_comment", { p_comment: commentId });
+    return { ok: true, data: null };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/* ------------------------------------------------------------ archive */
+
+export async function archiveTask(taskId: string, archive: boolean): Promise<Result<Task>> {
+  try {
+    const t = await rpc<Task>("archive_task", { p_task: taskId, p_archive: archive });
+    return { ok: true, data: t };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** Archives every completed task of the project. Returns the rows that changed. */
+export async function archiveDone(projectId: string): Promise<Result<Task[]>> {
+  try {
+    const list = await rpc<Task[]>("archive_done", { p_project: projectId });
+    return { ok: true, data: list };
   } catch (e) {
     return fail(e);
   }

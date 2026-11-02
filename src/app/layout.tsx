@@ -2,8 +2,11 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"),
   title: { default: "Tasklane", template: "%s · Tasklane" },
   description: "Project and task management for teams that ship.",
+  applicationName: "Tasklane",
+  openGraph: { type: "website", siteName: "Tasklane", title: "Tasklane", description: "Project and task management for teams that ship." },
 };
 
 export const viewport: Viewport = {

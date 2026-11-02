@@ -1,13 +1,15 @@
 import { NavLink } from "@/components/NavLink";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
+import { FlashToast } from "@/components/FlashToast";
 import { NewProject } from "@/components/NewProject";
 import { InviteList } from "@/components/InviteActions";
 import type { ProjectRole } from "@/lib/types";
 
 export const metadata: Metadata = { title: "Projects" };
 
-export default async function ProjectsPage() {
+export default async function ProjectsPage({ searchParams }: { searchParams: Promise<{ pw?: string }> }) {
+  const { pw } = await searchParams;
   const supabase = await createClient();
   const {
     data: { user },
@@ -25,6 +27,7 @@ export default async function ProjectsPage() {
         <NewProject />
       </div>
 
+      {pw && <FlashToast text="Password updated" />}
       <InviteList />
 
       {!projects?.length ? (

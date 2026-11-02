@@ -1,7 +1,8 @@
 "use client";
 
-import type { CSSProperties, DragEvent } from "react";
+import { useEffect, useState, type CSSProperties, type DragEvent } from "react";
 import { dueInfo } from "@/lib/format";
+import { elapsedSeconds, fmtClock } from "@/lib/timer";
 import type { Priority, Task } from "@/lib/types";
 import { Avatar, Icon } from "./ui";
 
@@ -22,13 +23,34 @@ export function PriorityIcon({ p }: { p: Priority }) {
   );
 }
 
+/** Time worked on a task. Ticks every second while its clock runs. */
+export function TaskTimer({ task }: { task: Task }) {
+  const running = task.status === "in_progress" && !!task.timer_started_at;
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    setNow(Date.now());
+    if (!running) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [running, task.timer_started_at]);
+  const secs = elapsedSeconds(task, now);
+  if (secs <= 0 && task.status !== "in_progress") return null;
+  const state = running ? "run" : task.status === "in_progress" ? "pause" : "idle";
+  return (
+    <span className="clock" data-state={state} title={running ? "Timer running" : task.status === "in_progress" ? "Timer paused (you are away)" : "Time worked"} suppressHydrationWarning>
+      <i aria-hidden /> {fmtClock(secs)}
+    </span>
+  );
+}
+
 export function TaskCard({
-  task, index, refKey, assignee, proposer, now, flash, draggable, dragging, onOpen, onDragStart, onDragEnd,
+  task, index, refKey, assignee, assigneePhoto, proposer, now, flash, draggable, dragging, onOpen, onDragStart, onDragEnd,
 }: {
   task: Task;
   index: number;
   refKey: string;
   assignee?: string;
+  assigneePhoto?: string | null;
   proposer?: string;
   now: number;
   flash: number;
@@ -39,7 +61,7 @@ export function TaskCard({
   onDragEnd: () => void;
 }) {
   const due = dueInfo(task, now);
-  const sentBack = (task.status === "todo" || task.status === "in_progress") && !!task.last_decision_note;
+  const sentBack = (task.status === "todo" || task.status === "in_progress" || task.status === "on_hold") && !!task.last_decision_note;
   return (
     <div
       role="button"
@@ -71,7 +93,7 @@ export function TaskCard({
           </span>
         )}
         <span className="grow">
-          {assignee ? <Avatar name={assignee} size={24} /> : <span title="Unassigned" className="avatar unassigned" style={{ width: 24, height: 24 }} />}
+          {assignee ? <Avatar name={assignee} size={24} src={assigneePhoto} /> : <span title="Unassigned" className="avatar unassigned" style={{ width: 24, height: 24 }} />}
         </span>
       </span>
       <span className="card-title">{task.title}</span>
@@ -89,6 +111,8 @@ export function TaskCard({
         <span className="due" data-overdue={due.overdue} title="Due date" suppressHydrationWarning>
           <Icon n="calendar" size={12} /> {due.label}
         </span>
+        <TaskTimer task={task} />
+        {task.archived_at && <span className="chip sm">Archived</span>}
         {task.estimate_hours != null && (
           <span className="est" title="Estimated effort">
             <Icon n="timer" size={12} /> {task.estimate_hours}h

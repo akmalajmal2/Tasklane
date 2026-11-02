@@ -27,7 +27,7 @@ export function navigateWithTransition(router: Router, href: string, kind: "page
         router.push(href);
         window.setTimeout(resolve, 2500); // never leave the page frozen if navigation stalls
       }),
-  ).finished.finally(() => {
+  ).finished.catch(() => {}).finally(() => {
     delete root.dataset.vt;
     delete root.dataset.dir;
   });

@@ -4,7 +4,8 @@ import type { Priority, ProjectRole, Status, Task } from "./types";
 export const COLUMNS: { id: Status; label: string; hint: string }[] = [
   { id: "proposed", label: "Proposed", hint: "Waiting for manager approval" },
   { id: "todo", label: "To do", hint: "Approved · not started" },
-  { id: "in_progress", label: "In progress", hint: "Being worked on" },
+  { id: "in_progress", label: "In progress", hint: "Being worked on · timer running" },
+  { id: "on_hold", label: "On hold", hint: "Paused · resume any time" },
   { id: "in_review", label: "In review", hint: "Waiting for approval" },
   { id: "testing", label: "In testing", hint: "Completed · QA pending" },
   { id: "done", label: "Completed", hint: "Approved" },
@@ -16,6 +17,7 @@ export const STATUS_LABEL: Record<Status, string> = {
   declined: "Declined",
   todo: "To do",
   in_progress: "In progress",
+  on_hold: "On hold",
   in_review: "In review",
   testing: "In testing",
   done: "Completed",
@@ -29,7 +31,7 @@ export const PRIORITIES: { id: Priority; label: string }[] = [
 ];
 
 type MoveKind =
-  | "start" | "pause" | "submit" | "approve" | "reject" | "pass" | "fail" | "reopen"
+  | "start" | "pause" | "hold" | "resume" | "submit" | "approve" | "reject" | "pass" | "fail" | "reopen"
   | "approve_proposal" | "decline" | "override";
 export interface Move {
   to: Status;
@@ -91,6 +93,14 @@ export function movesFor(t: Task, c: MoveCtx): Move[] {
     case "in_progress":
       if (t.assignee_id && mine) {
         out.push({ to: "in_review", kind: "submit", label: "Send for review", note: "none", tone: "primary" });
+        out.push({ to: "on_hold", kind: "hold", label: "Put on hold", note: "none", tone: "neutral" });
+        out.push({ to: "todo", kind: "pause", label: "Back to To do", note: "none", tone: "neutral" });
+      }
+      break;
+    case "on_hold":
+      // Only the assignee resumes. Starting another task also parks the current one here automatically.
+      if (t.assignee_id && mine) {
+        out.push({ to: "in_progress", kind: "resume", label: "Resume work", note: "none", tone: "primary" });
         out.push({ to: "todo", kind: "pause", label: "Back to To do", note: "none", tone: "neutral" });
       }
       break;
@@ -147,6 +157,7 @@ export function whyNoMove(t: Task, c: MoveCtx): string {
   if (t.status === "todo" && !t.assignee_id && c.isManager) return "Assign this task to someone before starting it.";
   if (t.status === "todo" && t.assignee_id && t.assignee_id !== c.userId) return "Only the person it is assigned to can start this task.";
   if (t.status === "in_progress" && t.assignee_id) return "Only the person it is assigned to can send it for review or move it back.";
+  if (t.status === "on_hold") return "Only the person it is assigned to can resume this task.";
   if (t.status === "in_review" && !c.isManager) return "Only a manager can approve or send back a review.";
   if (t.status === "in_review" && t.assignee_id === c.userId) return "You can't review your own task. Another manager has to.";
   if (t.status === "testing") return "Only a tester can pass or fail testing.";
@@ -157,6 +168,8 @@ export function whyNoMove(t: Task, c: MoveCtx): string {
 export function describeMove(from: Status, to: Status, ref: string): { text: string; tone: "info" | "success" | "danger" } {
   if (from === "proposed" && to === "declined") return { text: `declined ${ref}`, tone: "danger" };
   if ((from === "proposed" || from === "declined") && to === "todo") return { text: `approved ${ref}`, tone: "success" };
+  if (from === "in_progress" && to === "on_hold") return { text: `put ${ref} on hold`, tone: "info" };
+  if (from === "on_hold" && to === "in_progress") return { text: `resumed ${ref}`, tone: "info" };
   if (from === "in_progress" && to === "in_review") return { text: `sent ${ref} for review`, tone: "info" };
   if (from === "in_review" && to === "testing") return { text: `approved ${ref} and sent it to testing`, tone: "success" };
   if (from === "in_review" && to === "done") return { text: `approved ${ref}`, tone: "success" };
