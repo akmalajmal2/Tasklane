@@ -1,9 +1,10 @@
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { ProjectProvider } from "@/store/project-store";
-import { ProjectHeader } from "@/components/ProjectHeader";
-import { InviteDialog } from "@/components/InviteDialog";
+import { ProjectHeader } from "@/components/project/ProjectHeader";
+import { InviteDialog } from "@/components/project/InviteDialog";
 import type { Invite, Member, Project, Task } from "@/lib/types";
+import { canManageProject } from "@/lib/workflow";
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -41,7 +42,7 @@ export default async function ProjectLayout({ children, params }: { children: Re
   const isAdmin = !!me?.is_admin;
 
   let invites: Invite[] = [];
-  if (isAdmin || role === "manager") {
+  if (canManageProject(isAdmin, role)) {
     const { data } = await supabase
       .from("project_invites")
       .select("*")

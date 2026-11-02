@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { createStore, useStore, type StoreApi } from "@/lib/store";
 import { createClient } from "@/lib/supabase/client";
 import { withTransition } from "@/lib/motion";
-import { describeMove } from "@/lib/workflow";
+import { canManageProject, describeMove } from "@/lib/workflow";
 import type { Invite, Member, Priority, Project, ProjectRole, Task } from "@/lib/types";
 import { useAppApi } from "./app-store";
 
@@ -85,7 +85,7 @@ export function ProjectProvider({ init, children }: { init: ProjectInit; childre
   useEffect(() => {
     const sb = createClient();
     const { project, me } = store.getState();
-    const isManager = me.isAdmin || me.role === "manager";
+    const isManager = canManageProject(me.isAdmin, me.role);
     let connectedBefore = false;
 
     const refetchTasks = async () => {
@@ -168,8 +168,18 @@ export function ProjectProvider({ init, children }: { init: ProjectInit; childre
 
     // When I rename myself in Account settings, update my row in this project's team list too.
     let myName = app.getState().me.full_name;
+    // A task given to me or taken from me changes what I may see, and sends no live event for the row I lost.
+    // The notification that comes with it is the cue to look again straight away.
+    const WHO_SEES_CHANGED = new Set(["assigned", "unassigned", "proposal_approved"]);
+    const seen = new Set(app.getState().notices.map((n) => n.id));
     const unsubApp = app.subscribe(() => {
-      const n = app.getState().me.full_name;
+      const st = app.getState();
+      for (const n of st.notices) {
+        if (seen.has(n.id)) continue;
+        seen.add(n.id);
+        if (n.project_id === project.id && WHO_SEES_CHANGED.has(n.kind)) void refetchTasks();
+      }
+      const n = st.me.full_name;
       if (n === myName) return;
       myName = n;
       const s = store.getState();
@@ -178,7 +188,10 @@ export function ProjectProvider({ init, children }: { init: ProjectInit; childre
 
     const onVisible = () => document.visibilityState === "visible" && refetchTasks();
     document.addEventListener("visibilitychange", onVisible);
+    // Safety net: a private task that stops being visible to me sends no live event, so look again now and then.
+    const resync = window.setInterval(() => document.visibilityState === "visible" && void refetchTasks(), 60_000);
     return () => {
+      window.clearInterval(resync);
       document.removeEventListener("visibilitychange", onVisible);
       unsubApp();
       sb.removeChannel(ch);

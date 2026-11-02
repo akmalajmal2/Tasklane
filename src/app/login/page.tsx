@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { AuthForm } from "@/components/AuthForm";
-import { ThemeToggle } from "@/components/ThemeToggle";
+import { AuthForm } from "@/components/auth/AuthForm";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 
 export const metadata: Metadata = {
   title: "Sign in",

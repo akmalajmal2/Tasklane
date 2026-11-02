@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "@/app/actions";
-import { InviteButtons } from "@/components/InviteActions";
+import { InviteButtons } from "@/components/project/InviteActions";
 import Link from "next/link";
 
 export const metadata: Metadata = { title: "Invitation" };

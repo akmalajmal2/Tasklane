@@ -1,9 +1,9 @@
-import { NavLink } from "@/components/NavLink";
+import { NavLink } from "@/components/layout/NavLink";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
-import { FlashToast } from "@/components/FlashToast";
-import { NewProject } from "@/components/NewProject";
-import { InviteList } from "@/components/InviteActions";
+import { FlashToast } from "@/components/common/FlashToast";
+import { NewProject } from "@/components/project/NewProject";
+import { InviteList } from "@/components/project/InviteActions";
 import type { ProjectRole } from "@/lib/types";
 
 export const metadata: Metadata = { title: "Projects" };

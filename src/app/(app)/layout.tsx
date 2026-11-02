@@ -1,11 +1,11 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { AppProvider } from "@/store/app-store";
-import { TopBar } from "@/components/TopBar";
-import { Toasts } from "@/components/Toasts";
-import { ConfirmHost } from "@/components/ConfirmHost";
-import { WorkTimer } from "@/components/WorkTimer";
-import { AvatarSync } from "@/components/AvatarSync";
+import { TopBar } from "@/components/layout/TopBar";
+import { Toasts } from "@/components/common/Toasts";
+import { ConfirmHost } from "@/components/common/ConfirmHost";
+import { WorkTimer } from "@/components/timer/WorkTimer";
+import { AvatarSync } from "@/components/account/AvatarSync";
 import { NavSignal } from "@/lib/nav";
 import type { MyInvite, Notice, Profile } from "@/lib/types";
 
@@ -48,7 +48,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <main className="page" style={{ maxWidth: 640, paddingTop: 72 }}>
         <h1>Your profile could not be loaded</h1>
         <p style={{ color: "var(--ink-2)", margin: "8px 0 14px" }}>
-          You are signed in, but Tasklane could not read your profile from this Supabase project. Run <code>supabase/migration-v13-ensure-profile.sql</code> in the
+          You are signed in, but Tasklane could not read your profile from this Supabase project. Run <code>supabase/migrations/migration-v13-ensure-profile.sql</code> in the
           Supabase SQL Editor, check that <code>.env.local</code> points to the project where you ran the SQL, then sign in again.
         </p>
         {errors.length > 0 && (

@@ -2,21 +2,32 @@
 
 Jira-style project and task management: Kanban board, manager-approved task intake, role-based workflow, e-mail invitations, live updates, light/dark theme.
 
-**Stack:** Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · Zustand 5 · Supabase (Postgres, Auth, Realtime).
-No UI component library. Dialogs, drawers and menus use native `<dialog>` and the Popover API; motion is CSS (`@starting-style`, keyframes).
+**Stack:** Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · Supabase (Postgres, Auth, Realtime).
+No UI component library and no state library (a 30-line store on React's `useSyncExternalStore`). Dialogs, drawers and menus use native `<dialog>` and the Popover API; motion is CSS (`@starting-style`, keyframes).
 
 ## Setup
 
 1. `npm install`
 2. Create a Supabase project, open **SQL Editor**, paste and run `supabase/schema.sql` (once, on a fresh project).
-   *Upgrading an existing database?* Run, in order and once each, `supabase/migration-v4-order-and-reorder.sql` (card order) and `supabase/migration-v5-anyone-creates-projects.sql` (anyone can create a project).
-   *Upgrading from v1?* Run `supabase/migration-v2a-enum.sql` first, on its own, then `supabase/migration-v2b-functions.sql`.
+   *Upgrading an existing database?* See `supabase/README.md`. **If your database was made before v17, run `supabase/migrations/migration-v17-private-tasks.sql` once: that is what makes people see only their own tasks.**
 3. Supabase → **Authentication → URL Configuration**: set *Site URL* to your app URL and add `http://localhost:3000/auth/callback` (and your production URL) to *Redirect URLs*.
 4. Supabase → **Authentication → SMTP**: add your SMTP so confirmation e-mails are not rate-limited.
 5. Copy `.env.example` to `.env.local` and fill it in. Without `RESEND_API_KEY`, notification e-mails are printed to the server log instead of sent.
 6. `npm run dev`. **The first account you create becomes the workspace admin.**
 
 Deploy on Vercel: add the same env vars. `vercel.json` already schedules `/api/cron/overdue` hourly (it needs `CRON_SECRET` and `SUPABASE_SERVICE_ROLE_KEY`).
+
+## Who sees which task
+
+The database decides this (row-level security), so the board, task history, comments, attached files, live updates and work timers all follow the same rule.
+
+| | Sees |
+|---|---|
+| **Manager** (and a workspace admin on projects they have not joined) | every task and every timer |
+| **Developer / tester** | tasks assigned to them, their own proposal while it waits for a decision, and approved *unassigned* To do cards (the pool anyone may pick up) |
+| **Tester**, in addition | cards waiting in *In testing*, because testers pass or fail them |
+
+So a manager's own tasks, and other people's tasks and timers, are never sent to a developer. A task that is reassigned away from someone disappears from their board within a moment.
 
 ## Roles
 
@@ -80,7 +91,27 @@ Manager override: any column ↔ any column (except the Proposed lane), reason r
 - **Card order.** Managers can drag a card up or down inside To do / In progress / In review / In testing (blue line shows where it lands). Order is stored in `tasks.position` and synced live. Cards that change column go to the bottom unless dropped on a specific spot.
 - **Due date** is date-only (end of that day). **Estimate** stays an optional planning aid.
 - Card moves use the View Transitions API (graceful fallback, respects reduced motion).
-- **Dialogs.** Confirmations (delete task, remove member, remove own admin) use the in-app dialog (`ConfirmHost`, `app.ask()`), never `window.confirm`.
+- **Dialogs.** Confirmations (delete task, remove member, remove own admin) use the in-app dialog (`common/ConfirmHost`, `app.ask()`), never `window.confirm`.
+
+## Folder structure
+
+```
+src/
+  app/            routes, server actions (actions.ts, auth-actions.ts), global CSS
+  components/
+    auth/         sign-in and password reset forms
+    board/        Kanban board, cards, task drawer, task form, comments
+    project/      project header, team workload, invitations, new / delete project
+    account/      user menu, settings, profile photo, admin toggle
+    timer/        the face-checked work timer
+    layout/       top bar, notification bell, theme toggle, links
+    common/       dialogs, toasts, date picker, icons and other primitives
+  store/          app-wide and per-project state
+  lib/            workflow rules, timer maths, face matching, formatting, Supabase clients
+supabase/
+  schema.sql      everything, for a brand-new project
+  migrations/     one-off upgrades for an existing database (see supabase/README.md)
+```
 
 ## Trying it with two accounts
 

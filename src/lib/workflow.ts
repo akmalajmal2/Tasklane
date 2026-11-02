@@ -50,6 +50,12 @@ export interface MoveCtx {
   otherTesters: number;
 }
 
+/**
+ * Mirror of public.can_manage(): a member's project role decides. A workspace admin only acts as
+ * manager on projects they have NOT joined.
+ */
+export const canManageProject = (isAdmin: boolean, role: ProjectRole | null): boolean => (role ? role === "manager" : isAdmin);
+
 const isPending = (t: Task) => t.status === "proposed" || t.status === "declined";
 
 /** Managers edit anything not done; a proposer edits their own pending proposal. */

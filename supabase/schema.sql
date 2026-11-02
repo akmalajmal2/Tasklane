@@ -148,9 +148,12 @@ returns boolean language sql stable security definer set search_path = public as
   select public.is_admin() or public.member_role(p) is not null
 $$;
 
+-- A member's project role decides. A workspace admin only acts as manager on projects they have NOT joined.
 create or replace function public.can_manage(p uuid)
 returns boolean language sql stable security definer set search_path = public as $$
-  select public.is_admin() or public.member_role(p) = 'manager'
+  select case when public.member_role(p) is not null
+              then public.member_role(p) = 'manager'
+              else public.is_admin() end
 $$;
 
 -- Internal: store an in-app notification and return the e-mail payload.
@@ -522,7 +525,7 @@ begin
     raise exception 'STALE: this task is no longer waiting for approval';
   end if;
   select count(*) into other_approvers from public.profiles p
-   where p.id <> me and (p.is_admin or exists (
+   where p.id <> me and ((p.is_admin and not exists (select 1 from public.project_members mm where mm.user_id = p.id and mm.project_id = old.project_id)) or exists (
      select 1 from public.project_members m
       where m.user_id = p.id and m.project_id = old.project_id and m.role = 'manager'));
   if old.reporter_id = me and other_approvers > 0 then
@@ -603,7 +606,7 @@ begin
   if not found then raise exception 'Task not found'; end if;
 
   r := public.member_role(t.project_id);
-  mgr := adm or r = 'manager';
+  mgr := public.can_manage(t.project_id);
   if r is null and not adm then raise exception 'You are not a member of this project'; end if;
   if t.status <> p_from then
     raise exception 'STALE: this card was already moved to %', replace(t.status::text, '_', ' ');
@@ -614,7 +617,7 @@ begin
   link := '/projects/' || t.project_id || '?task=' || t.id;
 
   select count(*) into other_approvers from public.profiles p
-   where p.id <> me and (p.is_admin or exists (
+   where p.id <> me and ((p.is_admin and not exists (select 1 from public.project_members mm where mm.user_id = p.id and mm.project_id = t.project_id)) or exists (
      select 1 from public.project_members m
       where m.user_id = p.id and m.project_id = t.project_id and m.role = 'manager'));
   select count(*) into other_testers from public.project_members
@@ -802,7 +805,7 @@ begin
   if me is null then raise exception 'Not signed in'; end if;
   select * into t from public.tasks where id = p_task for update;
   if not found then raise exception 'Task not found'; end if;
-  if not (public.is_admin() or public.member_role(t.project_id) = 'manager') then
+  if not public.can_manage(t.project_id) then
     raise exception 'Only a manager can reorder cards';
   end if;
   update public.tasks set position = p_position, updated_by = me, updated_at = now()
@@ -1372,9 +1375,88 @@ create trigger on_auth_user_created
 insert into public.profiles (id, email, full_name, is_admin)
 select u.id, u.email,
        coalesce(nullif(u.raw_user_meta_data ->> 'full_name', ''), split_part(u.email, '@', 1)),
-       not exists (select 1 from public.profiles)
+       false
 from auth.users u
 left join public.profiles p on p.id = u.id
 where p.id is null;
+
+-- Somebody has to run the workspace: the oldest account, and only when there is no admin yet.
+-- (Never flag every backfilled account: admins count as managers on projects they have not joined.)
+update public.profiles set is_admin = true
+ where id = (select id from public.profiles order by created_at limit 1)
+   and not exists (select 1 from public.profiles where is_admin);
+
+notify pgrst, 'reload schema';
+
+-- ------------------------------------------------------- v17: people only see their own work (same as migration-v17-private-tasks.sql)
+-- v17: people only see their own work (replaces v16). Safe to run again.
+--
+-- Who can see a task. The database decides, so the board, history, comments, files, live updates and
+-- work timers all follow the same rule:
+--   * managers of the project (and workspace admins on projects they have not joined): every task
+--   * everyone else:
+--       - tasks assigned to them
+--       - their own proposal while it still waits for a decision (Proposed / Declined)
+--       - approved, unassigned "To do" cards (the pool anyone may pick up)
+--       - testers also see cards waiting in "In testing", because they are the ones who pass or fail them
+-- So a manager's own tasks, and other people's tasks and timers, are never shown to a developer.
+-- v16 also let a proposer keep seeing the card after a manager gave it to someone else; v17 does not.
+
+create or replace function public.task_visible(p_project uuid, p_assignee uuid, p_reporter uuid, p_status public.task_status)
+returns boolean language sql stable security definer set search_path = public as $$
+  select public.can_view(p_project) and (
+       public.can_manage(p_project)
+    or p_assignee = auth.uid()
+    or (p_reporter = auth.uid() and p_status in ('proposed', 'declined'))
+    or (p_assignee is null and p_status = 'todo')
+    or (p_status = 'testing' and public.member_role(p_project) = 'tester')
+  )
+$$;
+
+create or replace function public.can_see_task(p_task uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.tasks t
+     where t.id = p_task and public.task_visible(t.project_id, t.assignee_id, t.reporter_id, t.status))
+$$;
+
+grant execute on function public.task_visible(uuid, uuid, uuid, public.task_status) to authenticated;
+grant execute on function public.can_see_task(uuid) to authenticated;
+
+drop policy if exists tasks_read on public.tasks;
+create policy tasks_read on public.tasks for select to authenticated
+  using (public.task_visible(project_id, assignee_id, reporter_id, status));
+
+drop policy if exists events_read on public.task_events;
+create policy events_read on public.task_events for select to authenticated
+  using (public.can_see_task(task_id));
+
+drop policy if exists comments_read on public.task_comments;
+create policy comments_read on public.task_comments for select to authenticated
+  using (public.can_see_task(task_id));
+
+-- Attached files live under <project id>/<task id>/<file>: they follow the task.
+drop policy if exists task_files_read   on storage.objects;
+drop policy if exists task_files_upload on storage.objects;
+create policy task_files_read on storage.objects for select to authenticated
+  using (case when bucket_id = 'task-files' and array_length(storage.foldername(name), 1) >= 2
+              then public.can_see_task(((storage.foldername(name))[2])::uuid) else false end);
+create policy task_files_upload on storage.objects for insert to authenticated
+  with check (case when bucket_id = 'task-files' and array_length(storage.foldername(name), 1) >= 2
+                   then public.can_see_task(((storage.foldername(name))[2])::uuid) else false end);
+
+-- Commenting needs access to the task, not just to the project.
+do $$
+declare def text; newdef text;
+begin
+  select pg_get_functiondef(p.oid) into def from pg_proc p
+   where p.pronamespace = 'public'::regnamespace and p.proname = 'add_comment' and p.prokind = 'f';
+  if def is not null then
+    newdef := replace(def,
+      'if not public.can_view(t.project_id) then raise exception ''You do not have access to this project''; end if;',
+      'if not public.can_see_task(t.id) then raise exception ''You do not have access to this task''; end if;');
+    if newdef <> def then execute newdef; raise notice 'add_comment patched'; end if;
+  end if;
+end $$;
 
 notify pgrst, 'reload schema';

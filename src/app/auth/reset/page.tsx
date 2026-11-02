@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { ResetForm } from "@/components/ResetForm";
+import { ResetForm } from "@/components/auth/ResetForm";
 
 export const metadata: Metadata = { title: "Set a new password", robots: { index: false, follow: false } };
 

@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { AdminToggle } from "@/components/AdminToggle";
-import { Avatar } from "@/components/ui";
+import { AdminToggle } from "@/components/account/AdminToggle";
+import { Avatar } from "@/components/common/ui";
 import type { Profile } from "@/lib/types";
 
 export const metadata: Metadata = { title: "Admin" };
@@ -26,7 +26,7 @@ export default async function AdminPage() {
         <h1>Workspace people</h1>
       </div>
       <p style={{ color: "var(--ink-2)", marginBottom: 16, maxWidth: "65ch" }}>
-        Admins can create projects and see every project. Project roles (manager, developer, tester) are set per project when someone is invited.
+        Admins can create projects and see every project. Project roles (manager, developer, tester) are set per project when someone is invited. An admin who has joined a project works there with that project role; admin rights only act as manager on projects they have not joined. Give admin only to the few people who run the workspace.
       </p>
       <div className="table-wrap">
         <table className="tbl">
