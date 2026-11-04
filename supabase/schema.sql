@@ -1248,6 +1248,18 @@ begin
   end if;
 
   if p_running then
+    -- The browser that ran this clock may have vanished (tab closed, computer off): it reports in every ~40 s,
+    -- so a long silence means that stretch ended at its last sign of life + 2 minutes. Settle it, then start afresh.
+    if t.timer_started_at is not null then
+      select ping_at into ping from public.task_timer_pings where task_id = t.id;
+      if coalesce(ping, t.timer_started_at) < now() - interval '3 minutes' then
+        stop_at := coalesce(ping, t.timer_started_at) + interval '2 minutes';
+        update public.tasks set
+          worked_seconds = worked_seconds + greatest(0, floor(extract(epoch from stop_at - t.timer_started_at)))::int,
+          timer_started_at = null
+        where id = t.id returning * into t;
+      end if;
+    end if;
     if t.timer_started_at is null then
       update public.tasks set timer_started_at = now(), timer_pause_reason = null where id = t.id returning * into t;
     end if;

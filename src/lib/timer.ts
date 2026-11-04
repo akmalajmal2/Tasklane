@@ -19,6 +19,12 @@ export const HEARTBEAT_MS = 40_000;
 /** The camera and face models (a few MB the first time) get this long to start before the clock is stopped. */
 export const START_GRACE_MS = 60_000;
 
+/** The board tells the work timer about a move at once, so it does not wait for the realtime event. */
+export const TASK_MOVED = "tasklane:moved";
+export function announceMove(detail: { id?: string; to?: string } = {}) {
+  window.dispatchEvent(new CustomEvent(TASK_MOVED, { detail }));
+}
+
 export function elapsedSeconds(t: Pick<Task, "worked_seconds" | "timer_started_at">, now: number): number {
   const base = t.worked_seconds ?? 0;
   if (!t.timer_started_at || !now) return base;
@@ -41,5 +47,6 @@ export const PAUSE_LABEL: Record<string, string> = {
   sleep: "Paused · computer was asleep",
   camera: "Paused · camera off",
   offline: "Paused · connection lost",
+  signed_out: "Paused · signed out",
   waiting: "Waiting for you at the camera",
 };

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { announceMove } from "@/lib/timer";
 import { approveTask, createTask, updateTask, type TaskInput } from "@/app/actions";
 import { endOfDayIso, toLocalDate } from "@/lib/format";
 import { withTransition } from "@/lib/motion";
@@ -128,6 +129,7 @@ function Form({ state, onClose }: { state: NonNullable<FormState>; onClose: () =
           if (review) r = await approveTask(task!.id, input, String(f.get("note") ?? "").trim() || undefined);
           else if (task) r = await updateTask(task.id, input);
           else r = await createTask(project.id, input);
+          announceMove();
           if (!r.ok) return setError(r.error);
           withTransition(() => api.getState().upsertTask(r.data, { force: true }));
           const ref = `${project.key}-${r.data.number}`;

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { AWAY_MS, HEARTBEAT_MS, IDLE_MS, PAUSE_LABEL, RESUME_FRAMES, SLEEP_GAP_MS, START_GRACE_MS, elapsedSeconds, fmtClock } from "@/lib/timer";
+import { AWAY_MS, HEARTBEAT_MS, IDLE_MS, PAUSE_LABEL, RESUME_FRAMES, SLEEP_GAP_MS, START_GRACE_MS, TASK_MOVED, elapsedSeconds, fmtClock } from "@/lib/timer";
 import { grabFrame, idleCtor, idlePermission, loadFaceMatcher, steadyInterval, type FaceMatcher, type IdleDetectorLike } from "@/lib/presence";
 import type { Task } from "@/lib/types";
 import { useApp } from "@/store/app-store";
@@ -81,9 +81,17 @@ export function WorkTimer() {
     const poll = window.setInterval(() => void load(), 30_000);
     const onVisible = () => document.visibilityState === "visible" && void load();
     document.addEventListener("visibilitychange", onVisible);
+    // A card moved on this board: a card leaving In progress stops the clock and hides the pill immediately.
+    const onMoved = (e: Event) => {
+      const d = (e as CustomEvent<{ id?: string; to?: string }>).detail;
+      if (d?.id && d.to && d.to !== "in_progress") setTask((cur) => (cur && cur.id === d.id ? null : cur));
+      else void load();
+    };
+    window.addEventListener(TASK_MOVED, onMoved);
     return () => {
       window.clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener(TASK_MOVED, onMoved);
       sb.removeChannel(ch);
     };
   }, [meId, load]);
@@ -92,7 +100,6 @@ export function WorkTimer() {
   useEffect(() => {
     taskRef.current = task;
     if (!inflight.current) running.current = !!task?.timer_started_at;
-    if (task) lastBeat.current = Date.now();
   }, [task]);
 
   // Visible clock.
@@ -119,6 +126,19 @@ export function WorkTimer() {
     lastBeat.current = Date.now();
     setTask((cur) => (cur && cur.id === t.id ? { ...cur, ...(data as Task) } : cur));
   }, [load]);
+
+  // First sight of a task in this tab: report in at once. If the clock was left running by a tab that is gone
+  // (closed yesterday), the database settles that stretch at its last sign of life instead of showing a day of work.
+  const seenTask = useRef<string | null>(null);
+  useEffect(() => {
+    if (!task) {
+      seenTask.current = null;
+      return;
+    }
+    if (seenTask.current === task.id) return;
+    seenTask.current = task.id;
+    if (task.timer_started_at) void apply(true, null);
+  }, [task, apply]);
 
   /** Decide from everything we know whether the clock should run, and act if it differs. */
   evaluateRef.current = () => {

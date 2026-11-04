@@ -38,6 +38,13 @@ const mailLater = (list: Notified[]) => after(() => deliver(list));
 
 export async function signOut() {
   const supabase = await createClient();
+  // Stop my running work clock first: once I am signed out nobody is at the camera, and the browser stops reporting in.
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user) {
+    const { data: running } = await supabase
+      .from("tasks").select("id").eq("assignee_id", user.id).eq("status", "in_progress").not("timer_started_at", "is", null);
+    await Promise.all((running ?? []).map((t) => supabase.rpc("set_task_timer", { p_task: t.id, p_running: false, p_reason: "signed_out" })));
+  }
   await supabase.auth.signOut();
   redirect("/login");
 }

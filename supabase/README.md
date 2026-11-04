@@ -3,7 +3,7 @@
 | Your situation | Run |
 |---|---|
 | **New Supabase project** | `schema.sql` only. It already contains every migration below. |
-| **Existing database, unsure what it has** | `migrations/migration-v7-sync-all.sql`, then the later files in order (v11, v12a, v12b, v13, v14, v15, v17). Each is safe to run again. |
+| **Existing database, unsure what it has** | `migrations/migration-v7-sync-all.sql`, then the later files in order (v11, v12a, v12b, v13, v14, v15, v17, v18). Each is safe to run again. |
 | **Existing database, up to date except for who sees what** | `migrations/migration-v17-private-tasks.sql` |
 
 Never run `schema.sql` on a database that already has tables (it would fail on `create type`).
@@ -21,6 +21,7 @@ Very old database (before proposals existed)? Run `migrations/migration-v2a-enum
 | `migration-v13-ensure-profile.sql` | Fixes "no profile" at sign-in. |
 | `migration-v15-roles-fix.sql` | A member's project role decides; a workspace admin only acts as manager on projects they have not joined. |
 | `migration-v17-private-tasks.sql` | **Privacy.** A manager sees every task and timer. Anyone else sees only tasks assigned to them, their own pending proposal, and unassigned To do cards (testers also see In testing). Covers the board, history, comments, files and live updates. Replaces v16, which also let a proposer keep seeing a task after it was given to someone else. |
+| `migration-v18-stale-timer.sql` | A clock left running by a closed browser is settled at its last heartbeat + 2 minutes the next time the app opens, instead of counting the whole time away. |
 
 ## Work timer notes
 

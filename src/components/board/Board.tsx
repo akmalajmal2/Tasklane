@@ -7,6 +7,7 @@ import { uploadFiles } from "@/lib/files";
 import { createClient } from "@/lib/supabase/client";
 import { withTransition } from "@/lib/motion";
 import { useNow } from "@/lib/useNow";
+import { announceMove } from "@/lib/timer";
 import { COLUMNS, DECLINED_COLUMN, canManageProject, PRIORITIES, describeMove, movesFor, overrideMoves, whyNoMove, type Move, type MoveCtx } from "@/lib/workflow";
 import type { Priority, Status, Task } from "@/lib/types";
 import { useAppApi } from "@/store/app-store";
@@ -105,7 +106,9 @@ export function Board() {
       if (parked.length) {
         withTransition(() => parked.forEach((o) => api.getState().upsertTask({ ...o, status: "on_hold", position: Date.now() }, { force: true })));
       }
+      announceMove({ id: task.id, to: move.to });
       const r = await transitionTask(task.id, task.status, move.to, note, move.kind === "override");
+      announceMove(); // the database has answered: let the timer read the real state (starts it, or restores it on failure)
       if (r.ok) {
         s.upsertTask(r.data, { force: true });
         // Dropped on a specific spot: remember it (managers only; the server enforces this).
@@ -177,6 +180,7 @@ export function Board() {
       });
       if (!ok) return;
       const r = await deleteTask(task.id);
+      announceMove();
       if (!r.ok) return app.getState().toast({ text: r.error, tone: "danger" });
       withTransition(() => api.getState().removeTask(task.id));
       setOpenId(null);
